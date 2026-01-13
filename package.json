@@ -1,0 +1,21 @@
+{
+  "name": "telcocredit-png",
+  "private": true,
+  "packageManager": "pnpm@9.12.3",
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "tools/*"
+  ],
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "build": "pnpm -r build",
+    "start": "pnpm -r start",
+    "lint": "pnpm -r lint",
+    "format": "pnpm -r format",
+    "db:migrate": "pnpm --filter @telcocredit/api db:migrate",
+    "db:seed": "pnpm --filter @telcocredit/api db:seed",
+    "db:studio": "pnpm --filter @telcocredit/api db:studio",
+    "unpack:repo": "node tools/unpack-repo-txt.mjs repo.txt"
+  }
+}

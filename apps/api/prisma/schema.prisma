@@ -1,0 +1,279 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  EMPLOYER_ADMIN
+  FINANCE
+  VIEWER
+}
+
+enum EmployeeStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum Network {
+  DIGICEL
+  VODAFONE
+}
+
+enum ProductType {
+  AIRTIME
+  DATA
+}
+
+enum TopupStatus {
+  CREATED
+  HELD
+  SENT
+  SUCCESS
+  FAILED
+  PENDING
+  REVERSED
+}
+
+enum LedgerType {
+  CREDIT_LIMIT_USED
+  CREDIT_LIMIT_RELEASED
+  TOPUP_CHARGE
+  FEE
+  ADJUSTMENT
+  PAYMENT_RECEIVED
+}
+
+enum LedgerDirection {
+  DEBIT
+  CREDIT
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PAID
+  OVERDUE
+  VOID
+}
+
+model Tenant {
+  id                String       @id @default(uuid())
+  name              String
+  ipaRegNo           String?
+  billingEmail      String
+  status            TenantStatus @default(ACTIVE)
+  creditLimitMonthly Decimal      @db.Decimal(18,2) @default(0)
+  paymentTermsDays  Int          @default(7)
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  users             TenantUser[]
+  employees         Employee[]
+  policies          AllowancePolicy[]
+  assignments       EmployeeAllowanceAssignment[]
+  counters          EmployeeAllowanceCounter[]
+  topups            TopupRequest[]
+  ledger            LedgerEntry[]
+  invoices          Invoice[]
+  payments          Payment[]
+  auditLogs         AuditLog[]
+}
+
+model TenantUser {
+  id           String   @id @default(uuid())
+  tenantId     String?
+  tenant       Tenant?  @relation(fields: [tenantId], references: [id])
+  email        String   @unique
+  passwordHash String
+  role         UserRole
+  status       String   @default("ACTIVE")
+  createdAt    DateTime @default(now())
+}
+
+model Employee {
+  id         String         @id @default(uuid())
+  tenantId   String
+  tenant     Tenant         @relation(fields: [tenantId], references: [id])
+  fullName   String
+  msisdn     String
+  department String?
+  status     EmployeeStatus @default(ACTIVE)
+  createdAt  DateTime       @default(now())
+
+  topups     TopupRequest[]
+  assignments EmployeeAllowanceAssignment[]
+  counters   EmployeeAllowanceCounter[]
+
+  @@index([tenantId])
+  @@unique([tenantId, msisdn])
+}
+
+model AllowancePolicy {
+  id                 String   @id @default(uuid())
+  tenantId            String
+  tenant              Tenant   @relation(fields: [tenantId], references: [id])
+  name               String
+  dailyCap           Decimal  @db.Decimal(18,2)
+  weeklyCap          Decimal  @db.Decimal(18,2)
+  monthlyCap         Decimal  @db.Decimal(18,2)
+  perTxnCap          Decimal  @db.Decimal(18,2)
+  requireApprovalOver Decimal? @db.Decimal(18,2)
+  allowedHoursJson   Json?
+  createdAt          DateTime @default(now())
+
+  assignments        EmployeeAllowanceAssignment[]
+}
+
+model EmployeeAllowanceAssignment {
+  id         String   @id @default(uuid())
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id])
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id])
+  policyId   String
+  policy     AllowancePolicy @relation(fields: [policyId], references: [id])
+  effectiveFrom DateTime @default(now())
+  effectiveTo   DateTime?
+
+  @@index([tenantId])
+}
+
+model EmployeeAllowanceCounter {
+  id         String   @id @default(uuid())
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id])
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id])
+  periodType String   // DAY | WEEK | MONTH
+  periodStart DateTime
+  periodEnd   DateTime
+  amountUsed  Decimal @db.Decimal(18,2) @default(0)
+  updatedAt   DateTime @updatedAt
+
+  @@index([tenantId, employeeId, periodType, periodStart])
+}
+
+model TelcoConnector {
+  id        String   @id @default(uuid())
+  type      String   // DIGICEL_USSD | VODAFONE_API | VODAFONE_USSD
+  configJson Json
+  status    String   @default("ACTIVE")
+  createdAt DateTime @default(now())
+
+  topups    TopupRequest[]
+}
+
+model ResellerSim {
+  id             String   @id @default(uuid())
+  network        Network
+  msisdn         String
+  simIccid       String?
+  deviceId       String
+  status         String   @default("ACTIVE")
+  floatEstimate  Decimal  @db.Decimal(18,2) @default(0)
+  lastHealthCheckAt DateTime?
+  topups            TopupRequest[]
+}
+
+model TopupRequest {
+  id            String     @id @default(uuid())
+  tenantId      String
+  tenant        Tenant     @relation(fields: [tenantId], references: [id])
+  employeeId    String?
+  employee      Employee?  @relation(fields: [employeeId], references: [id])
+  msisdn        String
+  network       Network
+  productType   ProductType @default(AIRTIME)
+  amount        Decimal     @db.Decimal(18,2)
+  clientChannel String      // SMS | WEB | API
+  idempotencyKey String     @unique
+  status        TopupStatus @default(CREATED)
+  failureReason String?
+  telcoRef      String?
+  connectorId   String?
+  connector     TelcoConnector? @relation(fields: [connectorId], references: [id])
+  resellerSimId String?
+  resellerSim   ResellerSim? @relation(fields: [resellerSimId], references: [id])
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  ledgerEntries LedgerEntry[]
+}
+
+model LedgerEntry {
+  id            String @id @default(uuid())
+  tenantId      String
+  tenant        Tenant  @relation(fields: [tenantId], references: [id])
+  topupRequestId String?
+  topupRequest  TopupRequest? @relation(fields: [topupRequestId], references: [id])
+  type          LedgerType
+  direction     LedgerDirection
+  amount        Decimal @db.Decimal(18,2)
+  currency      String  @default("PGK")
+  description   String
+  createdAt     DateTime @default(now())
+}
+
+model Invoice {
+  id          String @id @default(uuid())
+  tenantId    String
+  tenant      Tenant @relation(fields: [tenantId], references: [id])
+  periodStart DateTime
+  periodEnd   DateTime
+  issueDate   DateTime
+  dueDate     DateTime
+  totalAmount Decimal @db.Decimal(18,2)
+  status      InvoiceStatus @default(DRAFT)
+  pdfUrl      String?
+  createdAt   DateTime @default(now())
+
+  lines       InvoiceLine[]
+  payments    Payment[]
+}
+
+model InvoiceLine {
+  id          String @id @default(uuid())
+  invoiceId   String
+  invoice     Invoice @relation(fields: [invoiceId], references: [id])
+  lineType    String  // TOPUP | FEE | ADJUSTMENT
+  description String
+  quantity    Int     @default(1)
+  unitPrice   Decimal @db.Decimal(18,2) @default(0)
+  amount      Decimal @db.Decimal(18,2)
+  metaJson    Json?
+}
+
+model Payment {
+  id         String @id @default(uuid())
+  tenantId   String
+  tenant     Tenant @relation(fields: [tenantId], references: [id])
+  invoiceId  String?
+  invoice    Invoice? @relation(fields: [invoiceId], references: [id])
+  amount     Decimal @db.Decimal(18,2)
+  method     String  @default("BANK_TRANSFER")
+  reference  String
+  receivedAt DateTime @default(now())
+  status     String  @default("UNMATCHED")
+}
+
+model AuditLog {
+  id         String @id @default(uuid())
+  tenantId   String?
+  tenant     Tenant? @relation(fields: [tenantId], references: [id])
+  actorUserId String?
+  action     String
+  entityType String
+  entityId   String?
+  metaJson   Json?
+  createdAt  DateTime @default(now())
+}

@@ -1,0 +1,2666 @@
+# TelcoCredit PNG — repo.txt (single-file blueprint)
+# Generated: 2026-01-12T23:34:56
+# Purpose: Corporate postpaid mobile credit platform (Employer portal + SMS commands + Telco connectors + Month-end invoices)
+# NOTE: This is a complete starter codebase you can paste into a repo as-is.
+# License: MIT (you may change)
+
+============================================================
+## 0) High-level overview
+============================================================
+This monorepo contains:
+- apps/api: Fastify + TypeScript backend (REST API + SMS webhook + billing + telco connector orchestration)
+- apps/web: Next.js + TypeScript employer portal (dashboards, employees, invoices)
+- packages/shared: shared types + validation schemas
+
+Core features implemented:
+- Employer (tenant) onboarding (self-signup) + RBAC roles
+- Employees (MSISDN linked) + allowance policies + counters
+- SMS commands: TOPUP <amount>, BAL, HISTORY, HELP
+- Postpaid employer credit limit + reserve-then-capture ledger entries
+- Telco connector layer (Digicel USSD via SIM gateway; Vodafone API stub + Vodafone USSD stub)
+- Month-end invoice generation + PDF invoice + XLSX usage report + email dispatch
+- Payment matching endpoint (manual) + overdue reminders + optional auto-suspension
+- Background jobs via BullMQ + Redis (billing, reconciliation, float checks)
+- Database via PostgreSQL + Prisma ORM
+
+What you still need to plug in for production:
+- Real SMS gateway credentials + webhook configuration
+- Real SIM/USSD gateway service (or operator partner HTTP API)
+- Real email provider (SMTP/SES/Mailgun/etc)
+- SSO/Auth: this starter uses simple JWT auth for speed; swap to Keycloak/Auth247 easily (instructions included)
+
+Target environment:
+- Docker (Postgres + Redis) + Node 20+
+
+============================================================
+## 1) Quick start (local)
+============================================================
+Prerequisites:
+- Node.js 20+
+- pnpm 9+ (recommended) or npm
+- Docker Desktop (for Postgres + Redis)
+
+Steps:
+1) Create a folder and copy this repo into files (see 'repo unpacking' note below)
+2) Start dependencies:
+   docker compose up -d
+
+3) Install deps:
+   pnpm install
+
+4) Configure env:
+   cp apps/api/.env.example apps/api/.env
+   cp apps/web/.env.example apps/web/.env
+   (edit values if needed)
+
+5) Init DB (Prisma):
+   pnpm db:migrate
+   pnpm db:seed
+
+6) Run dev:
+   pnpm dev
+
+Services:
+- API: http://localhost:4000
+- Web: http://localhost:3000
+- Prisma Studio: pnpm db:studio
+
+Repo unpacking:
+- This repo.txt is a single file snapshot of a multi-file repo.
+- To convert it into real files, you can:
+  A) Manually copy sections labeled "===== path =====" into those files, OR
+  B) Use the included script tools/unpack-repo-txt.mjs after you paste this file into repo root as "repo.txt".
+
+============================================================
+## 2) Production deployment notes (PNG)
+============================================================
+Recommended production topology:
+- Host API + Web on a VPS (Hostinger/VPS) or container platform (Fly.io / Railway / Render)
+- Host Postgres (managed) + Redis (managed or VPS)
+- Run SIM Gateway near the SIM bank / GSM modem (can be same VPS + USB modem, or on-prem mini PC)
+
+Critical production items:
+- Put SIM Gateway behind VPN (WireGuard) and IP allowlist it.
+- Enforce tenant isolation (already in queries) + add Postgres RLS if desired.
+- Enable HTTPS (Caddy/Nginx) + HSTS.
+- Add rate limits on SMS webhook and login endpoints.
+- Configure backups for Postgres.
+
+============================================================
+## 3) Folder structure
+============================================================
+telcocredit-png/
+  apps/
+    api/
+    web/
+  packages/
+    shared/
+  tools/
+  docker-compose.yml
+  package.json
+  pnpm-workspace.yaml
+  tsconfig.base.json
+  README.md
+
+
+==============================================================
+===== README.md =====
+==============================================================
+# TelcoCredit PNG (Corporate Mobile Credit Platform)
+
+This repo implements:
+- Employer onboarding + dashboards
+- Employee MSISDN linking + allowances
+- SMS topup requests with reserve/capture ledger
+- Telco connectors: Digicel USSD via SIM gateway + Vodafone API/USSD stubs
+- Automated month-end invoices + PDF + XLSX + email
+- Admin controls + fraud limits + reconciliation jobs
+
+## Run locally
+1) `docker compose up -d`
+2) `pnpm install`
+3) `cp apps/api/.env.example apps/api/.env`
+4) `cp apps/web/.env.example apps/web/.env`
+5) `pnpm db:migrate`
+6) `pnpm db:seed`
+7) `pnpm dev`
+
+Web: http://localhost:3000  
+API: http://localhost:4000
+
+## Default seeded users
+- Super Admin:
+  - email: admin@telcocredit.local
+  - password: Admin123!
+
+- Sample Employer Admin:
+  - email: acme.admin@telcocredit.local
+  - password: Admin123!
+
+## SMS Simulator
+To simulate inbound SMS locally:
+`curl -X POST http://localhost:4000/webhooks/sms/inbound -H "Content-Type: application/json" -d '{"from":"+67570123456","text":"TOPUP 5","messageId":"m1"}'`
+
+You'll get a JSON response with what would be sent back as SMS.
+
+==============================================================
+===== package.json =====
+==============================================================
+{
+  "name": "telcocredit-png",
+  "private": true,
+  "packageManager": "pnpm@9.12.3",
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "tools/*"
+  ],
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "build": "pnpm -r build",
+    "start": "pnpm -r start",
+    "lint": "pnpm -r lint",
+    "format": "pnpm -r format",
+    "db:migrate": "pnpm --filter @telcocredit/api db:migrate",
+    "db:seed": "pnpm --filter @telcocredit/api db:seed",
+    "db:studio": "pnpm --filter @telcocredit/api db:studio",
+    "unpack:repo": "node tools/unpack-repo-txt.mjs repo.txt"
+  }
+}
+
+==============================================================
+===== pnpm-workspace.yaml =====
+==============================================================
+packages:
+  - 'apps/*'
+  - 'packages/*'
+  - 'tools/*'
+
+==============================================================
+===== tsconfig.base.json =====
+==============================================================
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noUncheckedIndexedAccess": true,
+    "baseUrl": ".",
+    "paths": {
+      "@shared/*": ["packages/shared/src/*"]
+    }
+  }
+}
+
+==============================================================
+===== docker-compose.yml =====
+==============================================================
+services:
+  postgres:
+    image: postgres:16
+    container_name: telcocredit-postgres
+    environment:
+      POSTGRES_USER: telcocredit
+      POSTGRES_PASSWORD: telcocredit
+      POSTGRES_DB: telcocredit
+    ports:
+      - "5432:5432"
+    volumes:
+      - telcocredit_pg:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    container_name: telcocredit-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - telcocredit_redis:/data
+
+volumes:
+  telcocredit_pg:
+  telcocredit_redis:
+
+==============================================================
+===== tools/unpack-repo-txt.mjs =====
+==============================================================
+\
+/**
+ * Unpacks a repo.txt file into a real filesystem tree.
+ * Usage:
+ *   node tools/unpack-repo-txt.mjs repo.txt
+ *
+ * The repo.txt must contain file markers like:
+ *   ===== path/to/file.ext =====
+ * followed by file contents until next marker.
+ */
+import fs from "node:fs";
+import path from "node:path";
+
+const input = process.argv[2];
+if (!input) {
+  console.error("Usage: node tools/unpack-repo-txt.mjs repo.txt");
+  process.exit(1);
+}
+
+const txt = fs.readFileSync(input, "utf8");
+const lines = txt.split(/\r?\n/);
+
+const markerRe = /^===== (.+) =====$/;
+
+let currentPath = null;
+let buf = [];
+
+function flush() {
+  if (!currentPath) return;
+  const outPath = path.resolve(process.cwd(), currentPath);
+  fs.mkdirSync(path.dirname(outPath), { recursive: true });
+  fs.writeFileSync(outPath, buf.join("\n"), "utf8");
+  console.log("Wrote", currentPath);
+}
+
+for (let i = 0; i < lines.length; i++) {
+  const m = lines[i].match(markerRe);
+  if (m) {
+    flush();
+    currentPath = m[1].trim();
+    buf = [];
+    // skip the next separator lines if present
+    continue;
+  }
+  if (currentPath) buf.push(lines[i]);
+}
+
+flush();
+console.log("Done.");
+
+==============================================================
+===== packages/shared/package.json =====
+==============================================================
+{
+  "name": "@telcocredit/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "node -e "console.log('shared: no dev')"",
+    "build": "node -e "console.log('shared: no build')"",
+    "lint": "node -e "console.log('shared: lint handled at root')"",
+    "format": "node -e "console.log('shared: format handled at root')""
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  }
+}
+
+==============================================================
+===== packages/shared/src/index.ts =====
+==============================================================
+export * from "./schemas.js";
+export * from "./types.js";
+
+==============================================================
+===== packages/shared/src/types.ts =====
+==============================================================
+export type Network = "DIGICEL" | "VODAFONE";
+export type ProductType = "AIRTIME" | "DATA";
+
+export type TopUpStatus =
+  | "CREATED"
+  | "HELD"
+  | "SENT"
+  | "SUCCESS"
+  | "FAILED"
+  | "PENDING"
+  | "REVERSED";
+
+export type UserRole = "SUPER_ADMIN" | "EMPLOYER_ADMIN" | "FINANCE" | "VIEWER";
+
+export interface SmsInboundPayload {
+  from: string;      // MSISDN, e.g. +67570xxxxxx
+  text: string;      // message body
+  messageId: string; // unique id from gateway (idempotency key)
+  receivedAt?: string;
+}
+
+==============================================================
+===== packages/shared/src/schemas.ts =====
+==============================================================
+import { z } from "zod";
+
+export const MsisdnSchema = z
+  .string()
+  .trim()
+  .min(6)
+  .transform((v) => v.replace(/\s+/g, ""));
+
+export const MoneySchema = z.number().finite().nonnegative();
+
+export const SmsInboundSchema = z.object({
+  from: MsisdnSchema,
+  text: z.string().trim().min(1),
+  messageId: z.string().trim().min(1),
+  receivedAt: z.string().optional()
+});
+
+export const EmployerSignupSchema = z.object({
+  companyName: z.string().trim().min(2),
+  ipaRegNo: z.string().trim().optional(),
+  billingEmail: z.string().email(),
+  adminEmail: z.string().email(),
+  adminPassword: z.string().min(8)
+});
+
+export const EmployeeCreateSchema = z.object({
+  fullName: z.string().trim().min(2),
+  msisdn: MsisdnSchema,
+  department: z.string().trim().optional()
+});
+
+export const AllowancePolicySchema = z.object({
+  name: z.string().trim().min(2),
+  dailyCap: MoneySchema,
+  weeklyCap: MoneySchema,
+  monthlyCap: MoneySchema,
+  perTxnCap: MoneySchema,
+  requireApprovalOver: MoneySchema.optional()
+});
+
+export const TopupCreateSchema = z.object({
+  employeeId: z.string().uuid().optional(),
+  msisdn: MsisdnSchema,
+  network: z.enum(["DIGICEL", "VODAFONE"]),
+  productType: z.enum(["AIRTIME", "DATA"]).default("AIRTIME"),
+  amount: z.number().finite().positive(),
+  idempotencyKey: z.string().min(1)
+});
+
+==============================================================
+===== apps/api/package.json =====
+==============================================================
+{
+  "name": "@telcocredit/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "lint": "node -e "console.log('lint: run at root')"",
+    "format": "node -e "console.log('format: run at root')"",
+    "db:migrate": "prisma migrate dev",
+    "db:seed": "tsx prisma/seed.ts",
+    "db:studio": "prisma studio"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.0.1",
+    "@fastify/rate-limit": "^10.1.1",
+    "@fastify/swagger": "^9.3.0",
+    "@fastify/swagger-ui": "^4.2.0",
+    "@telcocredit/shared": "workspace:*",
+    "axios": "^1.7.7",
+    "bcryptjs": "^2.4.3",
+    "bullmq": "^5.16.0",
+    "dayjs": "^1.11.13",
+    "dotenv": "^16.4.5",
+    "exceljs": "^4.4.0",
+    "fastify": "^5.2.1",
+    "fastify-plugin": "^5.0.1",
+    "jsonwebtoken": "^9.0.2",
+    "nodemailer": "^6.9.15",
+    "pdfkit": "^0.15.0",
+    "pino": "^9.3.2",
+    "pino-pretty": "^11.2.2",
+    "prisma": "^5.20.0",
+    "@prisma/client": "^5.20.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.3",
+    "@types/jsonwebtoken": "^9.0.6",
+    "@types/nodemailer": "^6.4.16"
+  }
+}
+
+==============================================================
+===== apps/api/tsconfig.json =====
+==============================================================
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "types": ["node"],
+    "moduleResolution": "Bundler"
+  },
+  "include": ["src", "prisma"]
+}
+
+==============================================================
+===== apps/api/.env.example =====
+==============================================================
+# Server
+PORT=4000
+NODE_ENV=development
+API_BASE_URL=http://localhost:4000
+
+# Database
+DATABASE_URL=postgresql://telcocredit:telcocredit@localhost:5432/telcocredit?schema=public
+
+# Redis (BullMQ)
+REDIS_HOST=localhost
+REDIS_PORT=6379
+
+# Auth (starter JWT - replace with Keycloak/Auth247 in production)
+JWT_SECRET=change_me_super_secret
+JWT_ISSUER=telcocredit
+JWT_AUDIENCE=telcocredit-web
+TOKEN_TTL_SECONDS=86400
+
+# Email (SMTP)
+SMTP_HOST=localhost
+SMTP_PORT=1025
+SMTP_USER=
+SMTP_PASS=
+SMTP_FROM="TelcoCredit PNG <no-reply@telcocredit.local>"
+
+# SIM/USSD Gateway (your device farm / modem service)
+SIM_GATEWAY_URL=http://localhost:5050
+SIM_GATEWAY_API_KEY=dev_key
+
+# Billing
+PAYMENT_TERMS_DAYS=7
+AUTO_SUSPEND_AFTER_DAYS_OVERDUE=14
+
+# Pricing (simple)
+PLATFORM_FEE_MONTHLY=99
+
+# Feature flags
+ENABLE_AUTO_SUSPEND=false
+
+==============================================================
+===== apps/api/prisma/schema.prisma =====
+==============================================================
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  EMPLOYER_ADMIN
+  FINANCE
+  VIEWER
+}
+
+enum EmployeeStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum Network {
+  DIGICEL
+  VODAFONE
+}
+
+enum ProductType {
+  AIRTIME
+  DATA
+}
+
+enum TopupStatus {
+  CREATED
+  HELD
+  SENT
+  SUCCESS
+  FAILED
+  PENDING
+  REVERSED
+}
+
+enum LedgerType {
+  CREDIT_LIMIT_USED
+  CREDIT_LIMIT_RELEASED
+  TOPUP_CHARGE
+  FEE
+  ADJUSTMENT
+  PAYMENT_RECEIVED
+}
+
+enum LedgerDirection {
+  DEBIT
+  CREDIT
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PAID
+  OVERDUE
+  VOID
+}
+
+model Tenant {
+  id                String       @id @default(uuid())
+  name              String
+  ipaRegNo           String?
+  billingEmail      String
+  status            TenantStatus @default(ACTIVE)
+  creditLimitMonthly Decimal      @db.Decimal(18,2) @default(0)
+  paymentTermsDays  Int          @default(7)
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  users             TenantUser[]
+  employees         Employee[]
+  policies          AllowancePolicy[]
+  assignments       EmployeeAllowanceAssignment[]
+  counters          EmployeeAllowanceCounter[]
+  topups            TopupRequest[]
+  ledger            LedgerEntry[]
+  invoices          Invoice[]
+  payments          Payment[]
+  auditLogs         AuditLog[]
+}
+
+model TenantUser {
+  id           String   @id @default(uuid())
+  tenantId     String?
+  tenant       Tenant?  @relation(fields: [tenantId], references: [id])
+  email        String   @unique
+  passwordHash String
+  role         UserRole
+  status       String   @default("ACTIVE")
+  createdAt    DateTime @default(now())
+}
+
+model Employee {
+  id         String         @id @default(uuid())
+  tenantId   String
+  tenant     Tenant         @relation(fields: [tenantId], references: [id])
+  fullName   String
+  msisdn     String
+  department String?
+  status     EmployeeStatus @default(ACTIVE)
+  createdAt  DateTime       @default(now())
+
+  topups     TopupRequest[]
+  assignments EmployeeAllowanceAssignment[]
+  counters   EmployeeAllowanceCounter[]
+
+  @@index([tenantId])
+  @@unique([tenantId, msisdn])
+}
+
+model AllowancePolicy {
+  id                 String   @id @default(uuid())
+  tenantId            String
+  tenant              Tenant   @relation(fields: [tenantId], references: [id])
+  name               String
+  dailyCap           Decimal  @db.Decimal(18,2)
+  weeklyCap          Decimal  @db.Decimal(18,2)
+  monthlyCap         Decimal  @db.Decimal(18,2)
+  perTxnCap          Decimal  @db.Decimal(18,2)
+  requireApprovalOver Decimal? @db.Decimal(18,2)
+  allowedHoursJson   Json?
+  createdAt          DateTime @default(now())
+
+  assignments        EmployeeAllowanceAssignment[]
+}
+
+model EmployeeAllowanceAssignment {
+  id         String   @id @default(uuid())
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id])
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id])
+  policyId   String
+  policy     AllowancePolicy @relation(fields: [policyId], references: [id])
+  effectiveFrom DateTime @default(now())
+  effectiveTo   DateTime?
+
+  @@index([tenantId])
+}
+
+model EmployeeAllowanceCounter {
+  id         String   @id @default(uuid())
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id])
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id])
+  periodType String   // DAY | WEEK | MONTH
+  periodStart DateTime
+  periodEnd   DateTime
+  amountUsed  Decimal @db.Decimal(18,2) @default(0)
+  updatedAt   DateTime @updatedAt
+
+  @@index([tenantId, employeeId, periodType, periodStart])
+}
+
+model TelcoConnector {
+  id        String   @id @default(uuid())
+  type      String   // DIGICEL_USSD | VODAFONE_API | VODAFONE_USSD
+  configJson Json
+  status    String   @default("ACTIVE")
+  createdAt DateTime @default(now())
+
+  topups    TopupRequest[]
+}
+
+model ResellerSim {
+  id             String   @id @default(uuid())
+  network        Network
+  msisdn         String
+  simIccid       String?
+  deviceId       String
+  status         String   @default("ACTIVE")
+  floatEstimate  Decimal  @db.Decimal(18,2) @default(0)
+  lastHealthCheckAt DateTime?
+}
+
+model TopupRequest {
+  id            String     @id @default(uuid())
+  tenantId      String
+  tenant        Tenant     @relation(fields: [tenantId], references: [id])
+  employeeId    String?
+  employee      Employee?  @relation(fields: [employeeId], references: [id])
+  msisdn        String
+  network       Network
+  productType   ProductType @default(AIRTIME)
+  amount        Decimal     @db.Decimal(18,2)
+  clientChannel String      // SMS | WEB | API
+  idempotencyKey String     @unique
+  status        TopupStatus @default(CREATED)
+  failureReason String?
+  telcoRef      String?
+  connectorId   String?
+  connector     TelcoConnector? @relation(fields: [connectorId], references: [id])
+  resellerSimId String?
+  resellerSim   ResellerSim? @relation(fields: [resellerSimId], references: [id])
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  ledgerEntries LedgerEntry[]
+}
+
+model LedgerEntry {
+  id            String @id @default(uuid())
+  tenantId      String
+  tenant        Tenant  @relation(fields: [tenantId], references: [id])
+  topupRequestId String?
+  topupRequest  TopupRequest? @relation(fields: [topupRequestId], references: [id])
+  type          LedgerType
+  direction     LedgerDirection
+  amount        Decimal @db.Decimal(18,2)
+  currency      String  @default("PGK")
+  description   String
+  createdAt     DateTime @default(now())
+}
+
+model Invoice {
+  id          String @id @default(uuid())
+  tenantId    String
+  tenant      Tenant @relation(fields: [tenantId], references: [id])
+  periodStart DateTime
+  periodEnd   DateTime
+  issueDate   DateTime
+  dueDate     DateTime
+  totalAmount Decimal @db.Decimal(18,2)
+  status      InvoiceStatus @default(DRAFT)
+  pdfUrl      String?
+  createdAt   DateTime @default(now())
+
+  lines       InvoiceLine[]
+}
+
+model InvoiceLine {
+  id          String @id @default(uuid())
+  invoiceId   String
+  invoice     Invoice @relation(fields: [invoiceId], references: [id])
+  lineType    String  // TOPUP | FEE | ADJUSTMENT
+  description String
+  quantity    Int     @default(1)
+  unitPrice   Decimal @db.Decimal(18,2) @default(0)
+  amount      Decimal @db.Decimal(18,2)
+  metaJson    Json?
+}
+
+model Payment {
+  id         String @id @default(uuid())
+  tenantId   String
+  tenant     Tenant @relation(fields: [tenantId], references: [id])
+  invoiceId  String?
+  invoice    Invoice? @relation(fields: [invoiceId], references: [id])
+  amount     Decimal @db.Decimal(18,2)
+  method     String  @default("BANK_TRANSFER")
+  reference  String
+  receivedAt DateTime @default(now())
+  status     String  @default("UNMATCHED")
+}
+
+model AuditLog {
+  id         String @id @default(uuid())
+  tenantId   String?
+  tenant     Tenant? @relation(fields: [tenantId], references: [id])
+  actorUserId String?
+  action     String
+  entityType String
+  entityId   String?
+  metaJson   Json?
+  createdAt  DateTime @default(now())
+}
+
+==============================================================
+===== apps/api/src/index.ts =====
+==============================================================
+import "dotenv/config";
+import Fastify from "fastify";
+import cors from "@fastify/cors";
+import rateLimit from "@fastify/rate-limit";
+import swagger from "@fastify/swagger";
+import swaggerUI from "@fastify/swagger-ui";
+import { pino } from "pino";
+import { registerAuthRoutes } from "./routes/auth.js";
+import { registerTenantRoutes } from "./routes/tenants.js";
+import { registerEmployeeRoutes } from "./routes/employees.js";
+import { registerAllowanceRoutes } from "./routes/allowances.js";
+import { registerTopupRoutes } from "./routes/topups.js";
+import { registerSmsWebhookRoutes } from "./routes/sms-webhooks.js";
+import { registerInvoiceRoutes } from "./routes/invoices.js";
+import { registerPaymentRoutes } from "./routes/payments.js";
+import { registerAdminRoutes } from "./routes/admin.js";
+import { startWorkers } from "./workers/start.js";
+
+const logger = pino({
+  level: process.env.NODE_ENV === "development" ? "debug" : "info",
+  transport: process.env.NODE_ENV === "development" ? { target: "pino-pretty" } : undefined
+});
+
+const app = Fastify({ logger });
+
+await app.register(cors, { origin: true });
+await app.register(rateLimit, { max: 100, timeWindow: "1 minute" });
+
+await app.register(swagger, {
+  openapi: {
+    info: { title: "TelcoCredit API", version: "0.1.0" }
+  }
+});
+await app.register(swaggerUI, { routePrefix: "/docs" });
+
+app.get("/health", async () => ({ ok: true }));
+
+registerAuthRoutes(app);
+registerTenantRoutes(app);
+registerEmployeeRoutes(app);
+registerAllowanceRoutes(app);
+registerTopupRoutes(app);
+registerSmsWebhookRoutes(app);
+registerInvoiceRoutes(app);
+registerPaymentRoutes(app);
+registerAdminRoutes(app);
+
+await startWorkers(app.log);
+
+const port = Number(process.env.PORT || 4000);
+await app.listen({ port, host: "0.0.0.0" });
+
+==============================================================
+===== apps/api/src/lib/prisma.ts =====
+==============================================================
+import { PrismaClient } from "@prisma/client";
+
+export const prisma = new PrismaClient({
+  log: ["error", "warn"]
+});
+
+==============================================================
+===== apps/api/src/lib/env.ts =====
+==============================================================
+export const env = {
+  jwtSecret: process.env.JWT_SECRET || "change_me",
+  jwtIssuer: process.env.JWT_ISSUER || "telcocredit",
+  jwtAudience: process.env.JWT_AUDIENCE || "telcocredit-web",
+  tokenTtlSeconds: Number(process.env.TOKEN_TTL_SECONDS || 86400),
+
+  redisHost: process.env.REDIS_HOST || "localhost",
+  redisPort: Number(process.env.REDIS_PORT || 6379),
+
+  smtpHost: process.env.SMTP_HOST || "localhost",
+  smtpPort: Number(process.env.SMTP_PORT || 1025),
+  smtpUser: process.env.SMTP_USER || "",
+  smtpPass: process.env.SMTP_PASS || "",
+  smtpFrom: process.env.SMTP_FROM || "TelcoCredit <no-reply@telcocredit.local>",
+
+  simGatewayUrl: process.env.SIM_GATEWAY_URL || "http://localhost:5050",
+  simGatewayApiKey: process.env.SIM_GATEWAY_API_KEY || "dev_key",
+
+  paymentTermsDays: Number(process.env.PAYMENT_TERMS_DAYS || 7),
+  autoSuspendAfterDaysOverdue: Number(process.env.AUTO_SUSPEND_AFTER_DAYS_OVERDUE || 14),
+  enableAutoSuspend: (process.env.ENABLE_AUTO_SUSPEND || "false") === "true",
+
+  platformFeeMonthly: Number(process.env.PLATFORM_FEE_MONTHLY || 99)
+};
+
+==============================================================
+===== apps/api/src/lib/auth.ts =====
+==============================================================
+import jwt from "jsonwebtoken";
+import { env } from "./env.js";
+import type { UserRole } from "@telcocredit/shared";
+
+export type AuthUser = {
+  userId: string;
+  email: string;
+  role: UserRole;
+  tenantId?: string | null;
+};
+
+export function signToken(u: AuthUser) {
+  return jwt.sign(u, env.jwtSecret, {
+    issuer: env.jwtIssuer,
+    audience: env.jwtAudience,
+    expiresIn: env.tokenTtlSeconds
+  });
+}
+
+export function verifyToken(token: string): AuthUser {
+  return jwt.verify(token, env.jwtSecret, {
+    issuer: env.jwtIssuer,
+    audience: env.jwtAudience
+  }) as AuthUser;
+}
+
+export function getBearerToken(authHeader?: string) {
+  if (!authHeader) return null;
+  const m = authHeader.match(/^Bearer\s+(.+)$/i);
+  return m?.[1] || null;
+}
+
+==============================================================
+===== apps/api/src/lib/http-errors.ts =====
+==============================================================
+export class HttpError extends Error {
+  statusCode: number;
+  details?: unknown;
+  constructor(statusCode: number, message: string, details?: unknown) {
+    super(message);
+    this.statusCode = statusCode;
+    this.details = details;
+  }
+}
+
+export function assert(condition: unknown, statusCode: number, message: string, details?: unknown): asserts condition {
+  if (!condition) throw new HttpError(statusCode, message, details);
+}
+
+==============================================================
+===== apps/api/src/lib/money.ts =====
+==============================================================
+export function toNumber(v: unknown): number {
+  if (typeof v === "number") return v;
+  if (typeof v === "string") return Number(v);
+  // Prisma Decimal
+  // @ts-ignore
+  if (v && typeof v === "object" && typeof v.toNumber === "function") return v.toNumber();
+  return Number(v);
+}
+
+export function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+==============================================================
+===== apps/api/src/middleware/require-auth.ts =====
+==============================================================
+import type { FastifyInstance, FastifyRequest } from "fastify";
+import { getBearerToken, verifyToken, type AuthUser } from "../lib/auth.js";
+import { HttpError } from "../lib/http-errors.js";
+
+declare module "fastify" {
+  interface FastifyRequest {
+    user?: AuthUser;
+  }
+}
+
+export function requireAuth(app: FastifyInstance) {
+  return async function (req: FastifyRequest) {
+    const token = getBearerToken(req.headers.authorization);
+    if (!token) throw new HttpError(401, "Missing Bearer token");
+    req.user = verifyToken(token);
+  };
+}
+
+export function requireRole(roles: AuthUser["role"][]) {
+  return async function (req: FastifyRequest) {
+    if (!req.user) throw new HttpError(401, "Unauthorized");
+    if (!roles.includes(req.user.role)) throw new HttpError(403, "Forbidden");
+  };
+}
+
+==============================================================
+===== apps/api/src/middleware/require-tenant.ts =====
+==============================================================
+import type { FastifyRequest } from "fastify";
+import { HttpError } from "../lib/http-errors.js";
+
+export async function requireTenant(req: FastifyRequest) {
+  if (!req.user?.tenantId) throw new HttpError(400, "Tenant context missing for this user");
+}
+
+==============================================================
+===== apps/api/src/services/email.ts =====
+==============================================================
+import nodemailer from "nodemailer";
+import { env } from "../lib/env.js";
+
+export const transporter = nodemailer.createTransport({
+  host: env.smtpHost,
+  port: env.smtpPort,
+  secure: false,
+  auth: env.smtpUser ? { user: env.smtpUser, pass: env.smtpPass } : undefined
+});
+
+export async function sendEmail(opts: {
+  to: string;
+  subject: string;
+  text: string;
+  attachments?: { filename: string; content: Buffer }[];
+}) {
+  await transporter.sendMail({
+    from: env.smtpFrom,
+    to: opts.to,
+    subject: opts.subject,
+    text: opts.text,
+    attachments: opts.attachments?.map(a => ({ filename: a.filename, content: a.content }))
+  });
+}
+
+==============================================================
+===== apps/api/src/services/pdf-invoice.ts =====
+==============================================================
+import PDFDocument from "pdfkit";
+import dayjs from "dayjs";
+
+export async function renderInvoicePdf(data: {
+  invoiceNo: string;
+  companyName: string;
+  billingEmail: string;
+  periodStart: Date;
+  periodEnd: Date;
+  issueDate: Date;
+  dueDate: Date;
+  total: number;
+  lines: { description: string; amount: number }[];
+  paymentInstructions: string;
+}) {
+  const doc = new PDFDocument({ margin: 50 });
+  const chunks: Buffer[] = [];
+  doc.on("data", (d) => chunks.push(d));
+  const done = new Promise<Buffer>((resolve) => doc.on("end", () => resolve(Buffer.concat(chunks))));
+
+  doc.fontSize(20).text("TelcoCredit PNG", { align: "left" });
+  doc.moveDown(0.5);
+  doc.fontSize(14).text("Invoice / Statement", { align: "left" });
+  doc.moveDown();
+
+  doc.fontSize(10).text(`Invoice No: ${data.invoiceNo}`);
+  doc.text(`Company: ${data.companyName}`);
+  doc.text(`Billing Email: ${data.billingEmail}`);
+  doc.text(`Period: ${dayjs(data.periodStart).format("YYYY-MM-DD")} to ${dayjs(data.periodEnd).format("YYYY-MM-DD")}`);
+  doc.text(`Issue Date: ${dayjs(data.issueDate).format("YYYY-MM-DD")}`);
+  doc.text(`Due Date: ${dayjs(data.dueDate).format("YYYY-MM-DD")}`);
+  doc.moveDown();
+
+  doc.fontSize(12).text("Charges", { underline: true });
+  doc.moveDown(0.3);
+
+  data.lines.forEach((l) => {
+    doc.fontSize(10).text(`${l.description}`, { continued: true });
+    doc.text(`  PGK ${l.amount.toFixed(2)}`, { align: "right" });
+  });
+
+  doc.moveDown();
+  doc.fontSize(12).text(`Total Due: PGK ${data.total.toFixed(2)}`, { align: "right" });
+  doc.moveDown();
+
+  doc.fontSize(10).text("Payment Instructions", { underline: true });
+  doc.fontSize(9).text(data.paymentInstructions);
+
+  doc.end();
+  return done;
+}
+
+==============================================================
+===== apps/api/src/services/xlsx-usage.ts =====
+==============================================================
+import ExcelJS from "exceljs";
+import dayjs from "dayjs";
+
+export async function renderUsageXlsx(rows: Array<{
+  employeeName: string;
+  msisdn: string;
+  department?: string | null;
+  network: string;
+  amount: number;
+  status: string;
+  createdAt: Date;
+  telcoRef?: string | null;
+}>) {
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Usage");
+
+  ws.columns = [
+    { header: "Employee", key: "employeeName", width: 24 },
+    { header: "MSISDN", key: "msisdn", width: 16 },
+    { header: "Department", key: "department", width: 18 },
+    { header: "Network", key: "network", width: 10 },
+    { header: "Amount (PGK)", key: "amount", width: 12 },
+    { header: "Status", key: "status", width: 10 },
+    { header: "Date/Time", key: "createdAt", width: 20 },
+    { header: "Telco Ref", key: "telcoRef", width: 18 }
+  ];
+
+  rows.forEach(r => {
+    ws.addRow({
+      ...r,
+      createdAt: dayjs(r.createdAt).format("YYYY-MM-DD HH:mm:ss")
+    });
+  });
+
+  ws.getRow(1).font = { bold: true };
+
+  const buf = await wb.xlsx.writeBuffer();
+  return Buffer.from(buf);
+}
+
+==============================================================
+===== apps/api/src/telco/types.ts =====
+==============================================================
+export type TelcoResult =
+  | { status: "SUCCESS"; telcoRef: string; raw: string }
+  | { status: "FAILED"; telcoRef?: string; raw: string; reason: string }
+  | { status: "PENDING"; telcoRef?: string; raw: string };
+
+export interface TelcoConnector {
+  name: string;
+  supports(network: "DIGICEL" | "VODAFONE"): boolean;
+  topupAirtime(opts: { toMsisdn: string; amount: number; idempotencyKey: string }): Promise<TelcoResult>;
+}
+
+==============================================================
+===== apps/api/src/telco/digicel-ussd.ts =====
+==============================================================
+import axios from "axios";
+import { env } from "../lib/env.js";
+import type { TelcoConnector, TelcoResult } from "./types.js";
+
+/**
+ * Digicel reseller USSD connector via your SIM Gateway.
+ * You must implement a SIM gateway that can send USSD on a specific device/SIM and return the raw USSD response.
+ *
+ * Expected SIM gateway API (example):
+ * POST {SIM_GATEWAY_URL}/v1/ussd
+ *  { network: "DIGICEL", toMsisdn: "+6757xxxxxxx", amount: 5, idempotencyKey: "..." }
+ *  -> { status: "SUCCESS"|"FAILED"|"PENDING", telcoRef: "abc", raw: "..." , reason?: "..." }
+ */
+export class DigicelUssdConnector implements TelcoConnector {
+  name = "DIGICEL_USSD";
+  supports(network: "DIGICEL" | "VODAFONE") {
+    return network === "DIGICEL";
+  }
+
+  async topupAirtime(opts: { toMsisdn: string; amount: number; idempotencyKey: string }): Promise<TelcoResult> {
+    const r = await axios.post(
+      `${env.simGatewayUrl}/v1/ussd`,
+      { network: "DIGICEL", toMsisdn: opts.toMsisdn, amount: opts.amount, idempotencyKey: opts.idempotencyKey },
+      { headers: { "x-api-key": env.simGatewayApiKey }, timeout: 30000 }
+    );
+    return r.data as TelcoResult;
+  }
+}
+
+==============================================================
+===== apps/api/src/telco/vodafone-api.ts =====
+==============================================================
+import axios from "axios";
+import type { TelcoConnector, TelcoResult } from "./types.js";
+
+/**
+ * Vodafone partner API connector (stub).
+ * Replace with the actual Vodafone enterprise/reseller API once you have documentation/credentials.
+ */
+export class VodafoneApiConnector implements TelcoConnector {
+  name = "VODAFONE_API";
+  supports(network: "DIGICEL" | "VODAFONE") {
+    return network === "VODAFONE";
+  }
+
+  async topupAirtime(opts: { toMsisdn: string; amount: number; idempotencyKey: string }): Promise<TelcoResult> {
+    // Placeholder: in production call Vodafone endpoint with auth headers.
+    // Example:
+    // const r = await axios.post(`${baseUrl}/topup`, { msisdn: opts.toMsisdn, amount: opts.amount, txnId: opts.idempotencyKey }, { headers });
+    // return normalize(r.data);
+    await new Promise((res) => setTimeout(res, 300));
+    return { status: "PENDING", raw: "VODAFONE_API_STUB: pending" };
+  }
+}
+
+==============================================================
+===== apps/api/src/telco/vodafone-ussd.ts =====
+==============================================================
+import axios from "axios";
+import { env } from "../lib/env.js";
+import type { TelcoConnector, TelcoResult } from "./types.js";
+
+/**
+ * Vodafone reseller USSD connector via SIM Gateway (same pattern as Digicel).
+ */
+export class VodafoneUssdConnector implements TelcoConnector {
+  name = "VODAFONE_USSD";
+  supports(network: "DIGICEL" | "VODAFONE") {
+    return network === "VODAFONE";
+  }
+
+  async topupAirtime(opts: { toMsisdn: string; amount: number; idempotencyKey: string }): Promise<TelcoResult> {
+    const r = await axios.post(
+      `${env.simGatewayUrl}/v1/ussd`,
+      { network: "VODAFONE", toMsisdn: opts.toMsisdn, amount: opts.amount, idempotencyKey: opts.idempotencyKey },
+      { headers: { "x-api-key": env.simGatewayApiKey }, timeout: 30000 }
+    );
+    return r.data as TelcoResult;
+  }
+}
+
+==============================================================
+===== apps/api/src/telco/registry.ts =====
+==============================================================
+import type { TelcoConnector } from "./types.js";
+import { DigicelUssdConnector } from "./digicel-ussd.js";
+import { VodafoneApiConnector } from "./vodafone-api.js";
+import { VodafoneUssdConnector } from "./vodafone-ussd.js";
+
+const connectors: TelcoConnector[] = [
+  new DigicelUssdConnector(),
+  // Prefer API if it returns definitive SUCCESS; fallback to USSD if needed.
+  new VodafoneApiConnector(),
+  new VodafoneUssdConnector()
+];
+
+export function pickConnector(network: "DIGICEL" | "VODAFONE"): TelcoConnector {
+  const c = connectors.find(x => x.supports(network));
+  if (!c) throw new Error(`No connector for network ${network}`);
+  return c;
+}
+
+==============================================================
+===== apps/api/src/services/ledger.ts =====
+==============================================================
+import { prisma } from "../lib/prisma.js";
+import { round2, toNumber } from "../lib/money.js";
+import { assert } from "../lib/http-errors.js";
+import type { LedgerDirection, LedgerType } from "@prisma/client";
+
+export async function getTenantUsedThisPeriod(tenantId: string, periodStart: Date, periodEnd: Date) {
+  const entries = await prisma.ledgerEntry.findMany({
+    where: {
+      tenantId,
+      createdAt: { gte: periodStart, lte: periodEnd },
+      type: { in: ["TOPUP_CHARGE", "FEE"] }
+    }
+  });
+  const total = entries.reduce((s, e) => s + toNumber(e.amount), 0);
+  return round2(total);
+}
+
+export async function getTenantAvailableCredit(tenantId: string, periodStart: Date, periodEnd: Date) {
+  const tenant = await prisma.tenant.findUnique({ where: { id: tenantId } });
+  assert(tenant, 404, "Tenant not found");
+  const used = await getTenantUsedThisPeriod(tenantId, periodStart, periodEnd);
+  const limit = toNumber(tenant.creditLimitMonthly);
+  return round2(limit - used);
+}
+
+export async function createLedgerEntry(opts: {
+  tenantId: string;
+  topupRequestId?: string | null;
+  type: LedgerType | any;
+  direction: LedgerDirection | any;
+  amount: number;
+  description: string;
+}) {
+  return prisma.ledgerEntry.create({
+    data: {
+      tenantId: opts.tenantId,
+      topupRequestId: opts.topupRequestId || null,
+      type: opts.type,
+      direction: opts.direction,
+      amount: opts.amount as any,
+      description: opts.description
+    }
+  });
+}
+
+==============================================================
+===== apps/api/src/services/allowances.ts =====
+==============================================================
+import dayjs from "dayjs";
+import { prisma } from "../lib/prisma.js";
+import { assert } from "../lib/http-errors.js";
+import { toNumber, round2 } from "../lib/money.js";
+
+export async function getActivePolicyForEmployee(tenantId: string, employeeId: string) {
+  const assignment = await prisma.employeeAllowanceAssignment.findFirst({
+    where: { tenantId, employeeId, effectiveTo: null },
+    include: { policy: true }
+  });
+  assert(assignment?.policy, 400, "No allowance policy assigned to employee");
+  return assignment.policy;
+}
+
+export function currentPeriodBounds(periodType: "DAY" | "WEEK" | "MONTH") {
+  const now = dayjs();
+  if (periodType === "DAY") {
+    return { start: now.startOf("day").toDate(), end: now.endOf("day").toDate() };
+  }
+  if (periodType === "WEEK") {
+    return { start: now.startOf("week").toDate(), end: now.endOf("week").toDate() };
+  }
+  return { start: now.startOf("month").toDate(), end: now.endOf("month").toDate() };
+}
+
+export async function getOrCreateCounter(tenantId: string, employeeId: string, periodType: "DAY"|"WEEK"|"MONTH") {
+  const { start, end } = currentPeriodBounds(periodType);
+  const existing = await prisma.employeeAllowanceCounter.findFirst({
+    where: { tenantId, employeeId, periodType, periodStart: start }
+  });
+  if (existing) return existing;
+  return prisma.employeeAllowanceCounter.create({
+    data: { tenantId, employeeId, periodType, periodStart: start, periodEnd: end, amountUsed: 0 as any }
+  });
+}
+
+export async function checkAllowanceAndIncrement(opts: { tenantId: string; employeeId: string; amount: number }) {
+  const policy = await getActivePolicyForEmployee(opts.tenantId, opts.employeeId);
+
+  // Per txn cap
+  if (opts.amount > toNumber(policy.perTxnCap)) {
+    throw new Error(`Per-transaction cap exceeded. Max PGK ${toNumber(policy.perTxnCap).toFixed(2)}`);
+  }
+
+  const dayCounter = await getOrCreateCounter(opts.tenantId, opts.employeeId, "DAY");
+  const weekCounter = await getOrCreateCounter(opts.tenantId, opts.employeeId, "WEEK");
+  const monthCounter = await getOrCreateCounter(opts.tenantId, opts.employeeId, "MONTH");
+
+  const dayAfter = round2(toNumber(dayCounter.amountUsed) + opts.amount);
+  const weekAfter = round2(toNumber(weekCounter.amountUsed) + opts.amount);
+  const monthAfter = round2(toNumber(monthCounter.amountUsed) + opts.amount);
+
+  if (dayAfter > toNumber(policy.dailyCap)) throw new Error(`Daily cap exceeded. Remaining: PGK ${(toNumber(policy.dailyCap) - toNumber(dayCounter.amountUsed)).toFixed(2)}`);
+  if (weekAfter > toNumber(policy.weeklyCap)) throw new Error(`Weekly cap exceeded.`);
+  if (monthAfter > toNumber(policy.monthlyCap)) throw new Error(`Monthly cap exceeded.`);
+
+  // Increment counters (transactional)
+  await prisma.$transaction([
+    prisma.employeeAllowanceCounter.update({ where: { id: dayCounter.id }, data: { amountUsed: dayAfter as any } }),
+    prisma.employeeAllowanceCounter.update({ where: { id: weekCounter.id }, data: { amountUsed: weekAfter as any } }),
+    prisma.employeeAllowanceCounter.update({ where: { id: monthCounter.id }, data: { amountUsed: monthAfter as any } })
+  ]);
+
+  return { policy, dayAfter, weekAfter, monthAfter };
+}
+
+==============================================================
+===== apps/api/src/services/topup-engine.ts =====
+==============================================================
+import dayjs from "dayjs";
+import { prisma } from "../lib/prisma.js";
+import { assert } from "../lib/http-errors.js";
+import { round2, toNumber } from "../lib/money.js";
+import { pickConnector } from "../telco/registry.js";
+import { createLedgerEntry, getTenantAvailableCredit } from "./ledger.js";
+import { checkAllowanceAndIncrement } from "./allowances.js";
+
+export async function executeTopup(opts: {
+  tenantId: string;
+  employeeId: string;
+  msisdn: string;
+  network: "DIGICEL" | "VODAFONE";
+  amount: number;
+  idempotencyKey: string;
+  channel: "SMS" | "WEB" | "API";
+}) {
+  // Idempotency: if exists return it
+  const existing = await prisma.topupRequest.findUnique({ where: { idempotencyKey: opts.idempotencyKey } });
+  if (existing) return existing;
+
+  const employee = await prisma.employee.findUnique({ where: { id: opts.employeeId } });
+  assert(employee && employee.status === "ACTIVE", 400, "Employee not active");
+
+  const tenant = await prisma.tenant.findUnique({ where: { id: opts.tenantId } });
+  assert(tenant && tenant.status === "ACTIVE", 400, "Tenant not active");
+
+  // Period is current month
+  const periodStart = dayjs().startOf("month").toDate();
+  const periodEnd = dayjs().endOf("month").toDate();
+
+  // Allowance check + increment counters
+  await checkAllowanceAndIncrement({ tenantId: opts.tenantId, employeeId: opts.employeeId, amount: opts.amount });
+
+  // Employer credit check
+  const available = await getTenantAvailableCredit(opts.tenantId, periodStart, periodEnd);
+  if (opts.amount > available) throw new Error(`Employer credit limit exceeded. Remaining credit: PGK ${available.toFixed(2)}`);
+
+  // Create request
+  const req = await prisma.topupRequest.create({
+    data: {
+      tenantId: opts.tenantId,
+      employeeId: opts.employeeId,
+      msisdn: opts.msisdn,
+      network: opts.network,
+      productType: "AIRTIME",
+      amount: opts.amount as any,
+      clientChannel: opts.channel,
+      idempotencyKey: opts.idempotencyKey,
+      status: "HELD"
+    }
+  });
+
+  // Reserve credit (ledger)
+  await createLedgerEntry({
+    tenantId: opts.tenantId,
+    topupRequestId: req.id,
+    type: "CREDIT_LIMIT_USED",
+    direction: "DEBIT",
+    amount: opts.amount,
+    description: `Reserve PGK ${opts.amount.toFixed(2)} for ${opts.network} topup ${opts.msisdn}`
+  });
+
+  // Execute telco topup
+  const connector = pickConnector(opts.network);
+  await prisma.topupRequest.update({ where: { id: req.id }, data: { status: "SENT" } });
+
+  const result = await connector.topupAirtime({ toMsisdn: opts.msisdn, amount: opts.amount, idempotencyKey: opts.idempotencyKey });
+
+  if (result.status === "SUCCESS") {
+    await prisma.$transaction([
+      prisma.topupRequest.update({
+        where: { id: req.id },
+        data: { status: "SUCCESS", telcoRef: result.telcoRef, failureReason: null }
+      }),
+      createLedgerEntry({
+        tenantId: opts.tenantId,
+        topupRequestId: req.id,
+        type: "TOPUP_CHARGE",
+        direction: "DEBIT",
+        amount: round2(opts.amount),
+        description: `Topup SUCCESS ${opts.network} ${opts.msisdn} ref=${result.telcoRef}`
+      })
+    ]);
+  } else if (result.status === "FAILED") {
+    await prisma.$transaction([
+      prisma.topupRequest.update({
+        where: { id: req.id },
+        data: { status: "FAILED", telcoRef: result.telcoRef || null, failureReason: result.reason }
+      }),
+      createLedgerEntry({
+        tenantId: opts.tenantId,
+        topupRequestId: req.id,
+        type: "CREDIT_LIMIT_RELEASED",
+        direction: "CREDIT",
+        amount: round2(opts.amount),
+        description: `Topup FAILED - release reserve: ${result.reason}`
+      })
+    ]);
+  } else {
+    await prisma.topupRequest.update({
+      where: { id: req.id },
+      data: { status: "PENDING", telcoRef: result.telcoRef || null }
+    });
+    // Reservation remains held until reconciliation finalizes it.
+  }
+
+  return prisma.topupRequest.findUnique({ where: { id: req.id } });
+}
+
+==============================================================
+===== apps/api/src/routes/auth.ts =====
+==============================================================
+import type { FastifyInstance } from "fastify";
+import bcrypt from "bcryptjs";
+import { prisma } from "../lib/prisma.js";
+import { signToken } from "../lib/auth.js";
+import { HttpError } from "../lib/http-errors.js";
+
+export function registerAuthRoutes(app: FastifyInstance) {
+  app.post("/auth/login", async (req, reply) => {
+    const body = req.body as { email: string; password: string };
+    const user = await prisma.tenantUser.findUnique({ where: { email: body.email } });
+    if (!user) throw new HttpError(401, "Invalid credentials");
+    const ok = await bcrypt.compare(body.password, user.passwordHash);
+    if (!ok) throw new HttpError(401, "Invalid credentials");
+    const token = signToken({
+      userId: user.id,
+      email: user.email,
+      role: user.role as any,
+      tenantId: user.tenantId
+    });
+    return reply.send({ token, user: { email: user.email, role: user.role, tenantId: user.tenantId } });
+  });
+}
+
+==============================================================
+===== apps/api/src/routes/tenants.ts =====
+==============================================================
+import type { FastifyInstance } from "fastify";
+import bcrypt from "bcryptjs";
+import dayjs from "dayjs";
+import { prisma } from "../lib/prisma.js";
+import { assert, HttpError } from "../lib/http-errors.js";
+import { EmployerSignupSchema } from "@telcocredit/shared";
+import { env } from "../lib/env.js";
+
+export function registerTenantRoutes(app: FastifyInstance) {
+  // Self-signup: creates tenant + employer admin user + default policy
+  app.post("/tenants/signup", async (req) => {
+    const parsed = EmployerSignupSchema.safeParse(req.body);
+    if (!parsed.success) throw new HttpError(400, "Invalid payload", parsed.error.flatten());
+    const b = parsed.data;
+
+    const existing = await prisma.tenantUser.findUnique({ where: { email: b.adminEmail } });
+    assert(!existing, 400, "Admin email already exists");
+
+    const passwordHash = await bcrypt.hash(b.adminPassword, 10);
+
+    const tenant = await prisma.tenant.create({
+      data: {
+        name: b.companyName,
+        ipaRegNo: b.ipaRegNo || null,
+        billingEmail: b.billingEmail,
+        creditLimitMonthly: 10000 as any, // default; adjust for onboarding tier
+        paymentTermsDays: env.paymentTermsDays
+      }
+    });
+
+    const user = await prisma.tenantUser.create({
+      data: {
+        tenantId: tenant.id,
+        email: b.adminEmail,
+        passwordHash,
+        role: "EMPLOYER_ADMIN"
+      }
+    });
+
+    // Default allowance policy
+    const policy = await prisma.allowancePolicy.create({
+      data: {
+        tenantId: tenant.id,
+        name: "Default Policy",
+        dailyCap: 10 as any,
+        weeklyCap: 50 as any,
+        monthlyCap: 200 as any,
+        perTxnCap: 10 as any,
+        requireApprovalOver: 20 as any
+      }
+    });
+
+    return { tenant, user: { id: user.id, email: user.email, role: user.role }, defaultPolicy: policy };
+  });
+
+  app.get("/tenants/:id", async (req) => {
+    const id = (req.params as any).id as string;
+    const tenant = await prisma.tenant.findUnique({ where: { id } });
+    if (!tenant) throw new HttpError(404, "Tenant not found");
+    return tenant;
+  });
+
+  // For employer dashboards
+  app.get("/dashboard/summary", async (req) => {
+    // expects header x-tenant-id or token tenantId; simplest: token tenantId
+    const user = (req as any).user;
+    assert(user?.tenantId, 401, "Unauthorized");
+    const tenantId = user.tenantId as string;
+
+    const monthStart = dayjs().startOf("month").toDate();
+    const monthEnd = dayjs().endOf("month").toDate();
+
+    const topups = await prisma.topupRequest.findMany({
+      where: { tenantId, createdAt: { gte: monthStart, lte: monthEnd }, status: "SUCCESS" }
+    });
+
+    const totalSpend = topups.reduce((s, t) => s + Number(t.amount), 0);
+    const employees = await prisma.employee.count({ where: { tenantId } });
+
+    const byNetwork = topups.reduce((acc: any, t) => {
+      acc[t.network] = (acc[t.network] || 0) + Number(t.amount);
+      return acc;
+    }, {});
+
+    return { totalSpend, employees, byNetwork, periodStart: monthStart, periodEnd: monthEnd };
+  });
+}
+
+==============================================================
+===== apps/api/src/routes/employees.ts =====
+==============================================================
+import type { FastifyInstance } from "fastify";
+import { prisma } from "../lib/prisma.js";
+import { EmployeeCreateSchema } from "@telcocredit/shared";
+import { HttpError, assert } from "../lib/http-errors.js";
+import { requireAuth } from "../middleware/require-auth.js";
+import { requireTenant } from "../middleware/require-tenant.js";
+
+export function registerEmployeeRoutes(app: FastifyInstance) {
+  app.addHook("preHandler", async (req) => {
+    // only guard /employees routes
+    if (String(req.routerPath || "").startsWith("/employees")) {
+      await requireAuth(app)(req);
+      await requireTenant(req);
+    }
+  });
+
+  app.post("/employees", async (req) => {
+    const user = (req as any).user;
+    const parsed = EmployeeCreateSchema.safeParse(req.body);
+    if (!parsed.success) throw new HttpError(400, "Invalid payload", parsed.error.flatten());
+
+    const e = await prisma.employee.create({
+      data: {
+        tenantId: user.tenantId,
+        fullName: parsed.data.fullName,
+        msisdn: parsed.data.msisdn,
+        department: parsed.data.department || null
+      }
+    });
+
+    // If tenant has a default policy, auto-assign
+    const policy = await prisma.allowancePolicy.findFirst({ where: { tenantId: user.tenantId }, orderBy: { createdAt: "asc" } });
+    assert(policy, 400, "No allowance policy exists for tenant");
+    await prisma.employeeAllowanceAssignment.create({
+      data: { tenantId: user.tenantId, employeeId: e.id, policyId: policy.id }
+    });
+
+    return e;
+  });
+
+  app.get("/employees", async (req) => {
+    const user = (req as any).user;
+    return prisma.employee.findMany({ where: { tenantId: user.tenantId }, orderBy: { createdAt: "desc" } });
+  });
+
+  app.patch("/employees/:id", async (req) => {
+    const user = (req as any).user;
+    const id = (req.params as any).id as string;
+    const body = req.body as Partial<{ status: "ACTIVE" | "SUSPENDED"; department: string }>;
+
+    const emp = await prisma.employee.findFirst({ where: { id, tenantId: user.tenantId } });
+    assert(emp, 404, "Employee not found");
+
+    return prisma.employee.update({
+      where: { id },
+      data: {
+        status: body.status ?? emp.status,
+        department: body.department ?? emp.department
+      }
+    });
+  });
+}
+
+==============================================================
+===== apps/api/src/routes/allowances.ts =====
+==============================================================
+import type { FastifyInstance } from "fastify";
+import { prisma } from "../lib/prisma.js";
+import { AllowancePolicySchema } from "@telcocredit/shared";
+import { HttpError, assert } from "../lib/http-errors.js";
+import { requireAuth } from "../middleware/require-auth.js";
+import { requireTenant } from "../middleware/require-tenant.js";
+
+export function registerAllowanceRoutes(app: FastifyInstance) {
+  app.addHook("preHandler", async (req) => {
+    if (String(req.routerPath || "").startsWith("/allowance")) {
+      await requireAuth(app)(req);
+      await requireTenant(req);
+    }
+  });
+
+  app.post("/allowance/policies", async (req) => {
+    const user = (req as any).user;
+    const parsed = AllowancePolicySchema.safeParse(req.body);
+    if (!parsed.success) throw new HttpError(400, "Invalid payload", parsed.error.flatten());
+
+    return prisma.allowancePolicy.create({
+      data: {
+        tenantId: user.tenantId,
+        name: parsed.data.name,
+        dailyCap: parsed.data.dailyCap as any,
+        weeklyCap: parsed.data.weeklyCap as any,
+        monthlyCap: parsed.data.monthlyCap as any,
+        perTxnCap: parsed.data.perTxnCap as any,
+        requireApprovalOver: parsed.data.requireApprovalOver as any
+      }
+    });
+  });
+
+  app.get("/allowance/policies", async (req) => {
+    const user = (req as any).user;
+    return prisma.allowancePolicy.findMany({ where: { tenantId: user.tenantId } });
+  });
+
+  app.post("/allowance/assign", async (req) => {
+    const user = (req as any).user;
+    const body = req.body as { employeeId: string; policyId: string };
+    const emp = await prisma.employee.findFirst({ where: { id: body.employeeId, tenantId: user.tenantId } });
+    assert(emp, 404, "Employee not found");
+
+    // end existing assignment
+    await prisma.employeeAllowanceAssignment.updateMany({
+      where: { tenantId: user.tenantId, employeeId: emp.id, effectiveTo: null },
+      data: { effectiveTo: new Date() }
+    });
+
+    return prisma.employeeAllowanceAssignment.create({
+      data: { tenantId: user.tenantId, employeeId: emp.id, policyId: body.policyId }
+    });
+  });
+}
+
+==============================================================
+===== apps/api/src/routes/topups.ts =====
+==============================================================
+import type { FastifyInstance } from "fastify";
+import { prisma } from "../lib/prisma.js";
+import { TopupCreateSchema } from "@telcocredit/shared";
+import { HttpError, assert } from "../lib/http-errors.js";
+import { requireAuth } from "../middleware/require-auth.js";
+import { requireTenant } from "../middleware/require-tenant.js";
+import { executeTopup } from "../services/topup-engine.js";
+
+export function registerTopupRoutes(app: FastifyInstance) {
+  app.addHook("preHandler", async (req) => {
+    if (String(req.routerPath || "").startsWith("/topups")) {
+      await requireAuth(app)(req);
+      await requireTenant(req);
+    }
+  });
+
+  app.post("/topups", async (req) => {
+    const user = (req as any).user;
+    const parsed = TopupCreateSchema.safeParse(req.body);
+    if (!parsed.success) throw new HttpError(400, "Invalid payload", parsed.error.flatten());
+    const b = parsed.data;
+
+    const emp = b.employeeId
+      ? await prisma.employee.findFirst({ where: { id: b.employeeId, tenantId: user.tenantId } })
+      : await prisma.employee.findFirst({ where: { tenantId: user.tenantId, msisdn: b.msisdn } });
+    assert(emp, 404, "Employee not found");
+
+    const res = await executeTopup({
+      tenantId: user.tenantId,
+      employeeId: emp.id,
+      msisdn: emp.msisdn,
+      network: b.network,
+      amount: Number(b.amount),
+      idempotencyKey: b.idempotencyKey,
+      channel: "WEB"
+    });
+
+    return res;
+  });
+
+  app.get("/topups", async (req) => {
+    const user = (req as any).user;
+    return prisma.topupRequest.findMany({ where: { tenantId: user.tenantId }, orderBy: { createdAt: "desc" }, take: 200 });
+  });
+}
+
+==============================================================
+===== apps/api/src/routes/sms-webhooks.ts =====
+==============================================================
+import type { FastifyInstance } from "fastify";
+import dayjs from "dayjs";
+import { prisma } from "../lib/prisma.js";
+import { SmsInboundSchema } from "@telcocredit/shared";
+import { HttpError, assert } from "../lib/http-errors.js";
+import { executeTopup } from "../services/topup-engine.js";
+
+function normalizeText(t: string) {
+  return t.trim().replace(/\s+/g, " ").toUpperCase();
+}
+
+export function registerSmsWebhookRoutes(app: FastifyInstance) {
+  // Public endpoint - protect with IP allowlist or shared secret in production
+  app.post("/webhooks/sms/inbound", async (req) => {
+    const parsed = SmsInboundSchema.safeParse(req.body);
+    if (!parsed.success) throw new HttpError(400, "Invalid SMS payload", parsed.error.flatten());
+    const sms = parsed.data;
+
+    const text = normalizeText(sms.text);
+    const from = sms.from;
+
+    // Find employee across tenants (MSISDN unique per tenant but we can search globally)
+    const employee = await prisma.employee.findFirst({
+      where: { msisdn: from, status: "ACTIVE" },
+      include: { tenant: true }
+    });
+    if (!employee) {
+      return {
+        replyText: "Your number is not registered. Please contact your employer admin.",
+        action: "REJECT"
+      };
+    }
+
+    assert(employee.tenant.status === "ACTIVE", 400, "Employer account suspended");
+
+    // Determine network by prefix (customize for PNG). Fallback: tenant config or manual.
+    const network: "DIGICEL" | "VODAFONE" =
+      from.replace("+", "").startsWith("6757") ? "DIGICEL" : "VODAFONE";
+
+    if (text === "HELP") {
+      return { replyText: "Commands: TOPUP <amount>, BAL, HISTORY, HELP", action: "HELP" };
+    }
+
+    if (text === "BAL") {
+      // Current month usage from topups
+      const monthStart = dayjs().startOf("month").toDate();
+      const monthEnd = dayjs().endOf("month").toDate();
+      const used = await prisma.topupRequest.aggregate({
+        where: { tenantId: employee.tenantId, employeeId: employee.id, status: "SUCCESS", createdAt: { gte: monthStart, lte: monthEnd } },
+        _sum: { amount: true }
+      });
+      const amt = Number(used._sum.amount || 0);
+      return { replyText: `This month used: PGK ${amt.toFixed(2)}.`, action: "BAL" };
+    }
+
+    if (text === "HISTORY") {
+      const last = await prisma.topupRequest.findMany({
+        where: { tenantId: employee.tenantId, employeeId: employee.id },
+        orderBy: { createdAt: "desc" },
+        take: 3
+      });
+      if (last.length === 0) return { replyText: "No recent transactions.", action: "HISTORY" };
+      const lines = last.map(t => `${dayjs(t.createdAt).format("DD/MM")}: ${t.network} PGK ${Number(t.amount).toFixed(2)} ${t.status}`).join("; ");
+      return { replyText: `Last: ${lines}`, action: "HISTORY" };
+    }
+
+    const m = text.match(/^TOPUP\s+(\d+(?:\.\d{1,2})?)$/);
+    if (m) {
+      const amount = Number(m[1]);
+      if (!Number.isFinite(amount) || amount <= 0) throw new HttpError(400, "Invalid amount");
+
+      try {
+        const r = await executeTopup({
+          tenantId: employee.tenantId,
+          employeeId: employee.id,
+          msisdn: employee.msisdn,
+          network,
+          amount,
+          idempotencyKey: sms.messageId,
+          channel: "SMS"
+        });
+
+        return {
+          replyText:
+            r?.status === "SUCCESS"
+              ? `Topup SUCCESS: PGK ${amount.toFixed(2)} sent. Ref: ${r.telcoRef || "-"}`
+              : r?.status === "FAILED"
+              ? `Topup FAILED: ${r.failureReason || "Unknown"}`
+              : `Topup PENDING: we will confirm shortly.`,
+          action: "TOPUP",
+          topupStatus: r?.status || "UNKNOWN"
+        };
+      } catch (e: any) {
+        return { replyText: `Request rejected: ${e.message || "Error"}`, action: "REJECT" };
+      }
+    }
+
+    return { replyText: "Unknown command. Send HELP.", action: "UNKNOWN" };
+  });
+}
+
+==============================================================
+===== apps/api/src/routes/invoices.ts =====
+==============================================================
+import type { FastifyInstance } from "fastify";
+import { prisma } from "../lib/prisma.js";
+import { requireAuth } from "../middleware/require-auth.js";
+import { requireTenant } from "../middleware/require-tenant.js";
+import { assert } from "../lib/http-errors.js";
+
+export function registerInvoiceRoutes(app: FastifyInstance) {
+  app.addHook("preHandler", async (req) => {
+    if (String(req.routerPath || "").startsWith("/invoices")) {
+      await requireAuth(app)(req);
+      await requireTenant(req);
+    }
+  });
+
+  app.get("/invoices", async (req) => {
+    const user = (req as any).user;
+    return prisma.invoice.findMany({ where: { tenantId: user.tenantId }, orderBy: { issueDate: "desc" } });
+  });
+
+  app.get("/invoices/:id", async (req) => {
+    const user = (req as any).user;
+    const id = (req.params as any).id as string;
+    const inv = await prisma.invoice.findFirst({ where: { id, tenantId: user.tenantId }, include: { lines: true } });
+    assert(inv, 404, "Invoice not found");
+    return inv;
+  });
+}
+
+==============================================================
+===== apps/api/src/routes/payments.ts =====
+==============================================================
+import type { FastifyInstance } from "fastify";
+import { prisma } from "../lib/prisma.js";
+import { requireAuth } from "../middleware/require-auth.js";
+import { requireTenant } from "../middleware/require-tenant.js";
+import { assert } from "../lib/http-errors.js";
+import { createLedgerEntry } from "../services/ledger.js";
+
+export function registerPaymentRoutes(app: FastifyInstance) {
+  app.addHook("preHandler", async (req) => {
+    if (String(req.routerPath || "").startsWith("/payments")) {
+      await requireAuth(app)(req);
+      await requireTenant(req);
+    }
+  });
+
+  // Manual payment match (bank transfer)
+  app.post("/payments/manual-match", async (req) => {
+    const user = (req as any).user;
+    const body = req.body as { invoiceId: string; amount: number; reference: string };
+    const inv = await prisma.invoice.findFirst({ where: { id: body.invoiceId, tenantId: user.tenantId } });
+    assert(inv, 404, "Invoice not found");
+
+    const payment = await prisma.payment.create({
+      data: {
+        tenantId: user.tenantId,
+        invoiceId: inv.id,
+        amount: body.amount as any,
+        reference: body.reference,
+        status: "MATCHED"
+      }
+    });
+
+    await prisma.invoice.update({ where: { id: inv.id }, data: { status: "PAID" } });
+
+    await createLedgerEntry({
+      tenantId: user.tenantId,
+      type: "PAYMENT_RECEIVED",
+      direction: "CREDIT",
+      amount: body.amount,
+      description: `Payment received for invoice ${inv.id} ref=${body.reference}`
+    });
+
+    return { ok: true, payment };
+  });
+}
+
+==============================================================
+===== apps/api/src/routes/admin.ts =====
+==============================================================
+import type { FastifyInstance } from "fastify";
+import { prisma } from "../lib/prisma.js";
+import { requireAuth, requireRole } from "../middleware/require-auth.js";
+
+export function registerAdminRoutes(app: FastifyInstance) {
+  app.addHook("preHandler", async (req) => {
+    if (String(req.routerPath || "").startsWith("/admin")) {
+      await requireAuth(app)(req);
+      await requireRole(["SUPER_ADMIN"])(req);
+    }
+  });
+
+  app.get("/admin/tenants", async () => prisma.tenant.findMany({ orderBy: { createdAt: "desc" } }));
+
+  app.post("/admin/tenants/:id/suspend", async (req) => {
+    const id = (req.params as any).id as string;
+    return prisma.tenant.update({ where: { id }, data: { status: "SUSPENDED" } });
+  });
+
+  app.post("/admin/tenants/:id/activate", async (req) => {
+    const id = (req.params as any).id as string;
+    return prisma.tenant.update({ where: { id }, data: { status: "ACTIVE" } });
+  });
+}
+
+==============================================================
+===== apps/api/src/workers/queue.ts =====
+==============================================================
+import { Queue } from "bullmq";
+import { env } from "../lib/env.js";
+
+export const connection = {
+  host: env.redisHost,
+  port: env.redisPort
+};
+
+export const billingQueue = new Queue("billing", { connection });
+export const reconcileQueue = new Queue("reconcile", { connection });
+
+==============================================================
+===== apps/api/src/workers/start.ts =====
+==============================================================
+import type { Logger } from "pino";
+import { Worker } from "bullmq";
+import dayjs from "dayjs";
+import { billingQueue, connection, reconcileQueue } from "./queue.js";
+import { runMonthEndBillingIfDue } from "./tasks/month-end-billing.js";
+import { reconcilePendingTopups } from "./tasks/reconcile-pending.js";
+
+export async function startWorkers(log: Logger) {
+  // Repeat jobs
+  await billingQueue.add(
+    "month-end-scan",
+    {},
+    { repeat: { pattern: "10 0 * * *" } } // every day at 00:10
+  );
+
+  await reconcileQueue.add(
+    "reconcile-pending",
+    {},
+    { repeat: { pattern: "*/10 * * * *" } } // every 10 minutes
+  );
+
+  // Workers
+  new Worker(
+    "billing",
+    async (job) => {
+      log.info({ job: job.name }, "Billing job start");
+      await runMonthEndBillingIfDue(log);
+      log.info({ job: job.name }, "Billing job done");
+    },
+    { connection }
+  );
+
+  new Worker(
+    "reconcile",
+    async (job) => {
+      log.info({ job: job.name }, "Reconcile job start");
+      await reconcilePendingTopups(log);
+      log.info({ job: job.name }, "Reconcile job done");
+    },
+    { connection }
+  );
+
+  log.info({ at: dayjs().toISOString() }, "Workers started");
+}
+
+==============================================================
+===== apps/api/src/workers/tasks/month-end-billing.ts =====
+==============================================================
+import type { Logger } from "pino";
+import dayjs from "dayjs";
+import { prisma } from "../../lib/prisma.js";
+import { env } from "../../lib/env.js";
+import { renderInvoicePdf } from "../../services/pdf-invoice.js";
+import { renderUsageXlsx } from "../../services/xlsx-usage.js";
+import { sendEmail } from "../../services/email.js";
+import { toNumber, round2 } from "../../lib/money.js";
+
+/**
+ * Runs month-end billing on the 1st day of a month for the previous month,
+ * or you can trigger manually by calling this function with a different date.
+ */
+export async function runMonthEndBillingIfDue(log: Logger) {
+  const now = dayjs();
+
+  // Only run on the 1st day of the month by default
+  if (now.date() !== 1) return;
+
+  const periodStart = now.subtract(1, "month").startOf("month").toDate();
+  const periodEnd = now.subtract(1, "month").endOf("month").toDate();
+  const issueDate = now.toDate();
+
+  const tenants = await prisma.tenant.findMany({ where: { status: "ACTIVE" } });
+
+  for (const t of tenants) {
+    // Avoid double billing: if invoice exists for period skip
+    const exists = await prisma.invoice.findFirst({
+      where: { tenantId: t.id, periodStart, periodEnd }
+    });
+    if (exists) continue;
+
+    const dueDate = dayjs(issueDate).add(t.paymentTermsDays || env.paymentTermsDays, "day").toDate();
+
+    const topups = await prisma.topupRequest.findMany({
+      where: { tenantId: t.id, status: "SUCCESS", createdAt: { gte: periodStart, lte: periodEnd } },
+      include: { employee: true }
+    });
+
+    const totalTopups = round2(topups.reduce((s, x) => s + toNumber(x.amount), 0));
+
+    // Platform fee (optional)
+    const platformFee = env.platformFeeMonthly ? round2(env.platformFeeMonthly) : 0;
+
+    const totalDue = round2(totalTopups + platformFee);
+
+    const invoice = await prisma.invoice.create({
+      data: {
+        tenantId: t.id,
+        periodStart,
+        periodEnd,
+        issueDate,
+        dueDate,
+        totalAmount: totalDue as any,
+        status: "ISSUED",
+        lines: {
+          create: [
+            ...(totalTopups > 0
+              ? [{ lineType: "TOPUP", description: "Mobile credit usage", quantity: 1, unitPrice: totalTopups as any, amount: totalTopups as any }]
+              : []),
+            ...(platformFee > 0
+              ? [{ lineType: "FEE", description: "Platform fee", quantity: 1, unitPrice: platformFee as any, amount: platformFee as any }]
+              : [])
+          ]
+        }
+      },
+      include: { lines: true }
+    });
+
+    const invoiceNo = invoice.id.slice(0, 8).toUpperCase();
+
+    const pdf = await renderInvoicePdf({
+      invoiceNo,
+      companyName: t.name,
+      billingEmail: t.billingEmail,
+      periodStart,
+      periodEnd,
+      issueDate,
+      dueDate,
+      total: totalDue,
+      lines: invoice.lines.map(l => ({ description: l.description, amount: Number(l.amount) })),
+      paymentInstructions: `Pay by bank transfer and use reference: INV-${invoiceNo}. Your account will be updated once matched.`
+    });
+
+    const xlsx = await renderUsageXlsx(topups.map(tp => ({
+      employeeName: tp.employee?.fullName || "Unknown",
+      msisdn: tp.msisdn,
+      department: tp.employee?.department,
+      network: tp.network,
+      amount: Number(tp.amount),
+      status: tp.status,
+      createdAt: tp.createdAt,
+      telcoRef: tp.telcoRef
+    })));
+
+    try {
+      await sendEmail({
+        to: t.billingEmail,
+        subject: `Mobile Credit Statement – ${dayjs(periodStart).format("MMMM YYYY")} (${t.name})`,
+        text: `Dear ${t.name},\n\nPlease find attached your statement for ${dayjs(periodStart).format("MMMM YYYY")}.\nTotal Due: PGK ${totalDue.toFixed(2)}\nDue Date: ${dayjs(dueDate).format("YYYY-MM-DD")}\nReference: INV-${invoiceNo}\n\nRegards,\nTelcoCredit PNG`,
+        attachments: [
+          { filename: `Invoice-${invoiceNo}.pdf`, content: pdf },
+          { filename: `Usage-${dayjs(periodStart).format("YYYY-MM")}.xlsx`, content: xlsx }
+        ]
+      });
+      log.info({ tenant: t.id, invoice: invoice.id }, "Statement emailed");
+    } catch (e: any) {
+      log.error({ tenant: t.id, err: e?.message || e }, "Failed to send statement email");
+    }
+  }
+}
+
+==============================================================
+===== apps/api/src/workers/tasks/reconcile-pending.ts =====
+==============================================================
+import type { Logger } from "pino";
+import dayjs from "dayjs";
+import { prisma } from "../../lib/prisma.js";
+import { createLedgerEntry } from "../../services/ledger.js";
+
+/**
+ * Reconcile PENDING topups. In a real implementation:
+ * - Query telco API for status OR ask SIM gateway for last known status by txnId
+ * - If success, capture. If failed, release.
+ *
+ * This starter marks very old PENDING (>30 min) as FAILED and releases reserve.
+ */
+export async function reconcilePendingTopups(log: Logger) {
+  const cutoff = dayjs().subtract(30, "minute").toDate();
+  const pendings = await prisma.topupRequest.findMany({
+    where: { status: "PENDING", createdAt: { lte: cutoff } },
+    take: 50
+  });
+
+  for (const p of pendings) {
+    // Conservative: fail and release. Replace with real reconciliation.
+    await prisma.$transaction([
+      prisma.topupRequest.update({
+        where: { id: p.id },
+        data: { status: "FAILED", failureReason: "Reconcile timeout - no confirmation from telco" }
+      }),
+      createLedgerEntry({
+        tenantId: p.tenantId,
+        topupRequestId: p.id,
+        type: "CREDIT_LIMIT_RELEASED",
+        direction: "CREDIT",
+        amount: Number(p.amount),
+        description: "Auto-release reserve after pending timeout"
+      })
+    ]);
+    log.warn({ topup: p.id }, "Pending topup auto-failed and reserve released");
+  }
+}
+
+==============================================================
+===== apps/api/prisma/seed.ts =====
+==============================================================
+import bcrypt from "bcryptjs";
+import { prisma } from "../src/lib/prisma.js";
+
+async function main() {
+  // Super admin (no tenant)
+  const adminEmail = "admin@telcocredit.local";
+  const passwordHash = await bcrypt.hash("Admin123!", 10);
+
+  await prisma.tenantUser.upsert({
+    where: { email: adminEmail },
+    update: {},
+    create: { email: adminEmail, passwordHash, role: "SUPER_ADMIN" }
+  });
+
+  // Sample tenant + employer admin
+  const tenant = await prisma.tenant.upsert({
+    where: { id: "00000000-0000-0000-0000-000000000001" },
+    update: {},
+    create: {
+      id: "00000000-0000-0000-0000-000000000001",
+      name: "Acme PNG Ltd",
+      billingEmail: "billing@acme.local",
+      creditLimitMonthly: 5000 as any,
+      paymentTermsDays: 7
+    }
+  });
+
+  const employerAdminEmail = "acme.admin@telcocredit.local";
+  await prisma.tenantUser.upsert({
+    where: { email: employerAdminEmail },
+    update: {},
+    create: { tenantId: tenant.id, email: employerAdminEmail, passwordHash, role: "EMPLOYER_ADMIN" }
+  });
+
+  const policy = await prisma.allowancePolicy.create({
+    data: {
+      tenantId: tenant.id,
+      name: "Field Staff Policy",
+      dailyCap: 5 as any,
+      weeklyCap: 25 as any,
+      monthlyCap: 100 as any,
+      perTxnCap: 5 as any,
+      requireApprovalOver: 20 as any
+    }
+  });
+
+  const emp = await prisma.employee.create({
+    data: {
+      tenantId: tenant.id,
+      fullName: "John K",
+      msisdn: "+67570123456",
+      department: "Field"
+    }
+  });
+
+  await prisma.employeeAllowanceAssignment.create({
+    data: { tenantId: tenant.id, employeeId: emp.id, policyId: policy.id }
+  });
+
+  console.log("Seeded users/tenant/employee.");
+}
+
+main()
+  .then(() => prisma.$disconnect())
+  .catch(async (e) => {
+    console.error(e);
+    await prisma.$disconnect();
+    process.exit(1);
+  });
+
+==============================================================
+===== apps/web/package.json =====
+==============================================================
+{
+  "name": "@telcocredit/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "next start -p 3000",
+    "lint": "next lint",
+    "format": "node -e "console.log('format: run at root')""
+  },
+  "dependencies": {
+    "@telcocredit/shared": "workspace:*",
+    "next": "^15.1.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "@types/node": "^22.8.7",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1"
+  }
+}
+
+==============================================================
+===== apps/web/.env.example =====
+==============================================================
+NEXT_PUBLIC_API_BASE_URL=http://localhost:4000
+
+==============================================================
+===== apps/web/next.config.mjs =====
+==============================================================
+export default { reactStrictMode: true };
+
+==============================================================
+===== apps/web/app/layout.tsx =====
+==============================================================
+import "./globals.css";
+
+export const metadata = {
+  title: "TelcoCredit PNG",
+  description: "Corporate mobile credit platform"
+};
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body>
+        <div className="min-h-screen bg-gray-50 text-gray-900">
+          <div className="mx-auto max-w-6xl p-6">
+            <header className="flex items-center justify-between py-4">
+              <div className="text-xl font-semibold">TelcoCredit PNG</div>
+              <nav className="text-sm flex gap-4">
+                <a href="/" className="underline">Dashboard</a>
+                <a href="/employees" className="underline">Employees</a>
+                <a href="/invoices" className="underline">Invoices</a>
+              </nav>
+            </header>
+            <main className="rounded-xl bg-white p-6 shadow-sm">{children}</main>
+          </div>
+        </div>
+      </body>
+    </html>
+  );
+}
+
+==============================================================
+===== apps/web/app/globals.css =====
+==============================================================
+* { box-sizing: border-box; }
+body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
+a { color: inherit; }
+input, button { font: inherit; }
+
+==============================================================
+===== apps/web/app/lib/api.ts =====
+==============================================================
+const API = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:4000";
+
+export function getToken() {
+  if (typeof window === "undefined") return "";
+  return localStorage.getItem("token") || "";
+}
+
+export async function apiGet(path: string) {
+  const token = getToken();
+  const res = await fetch(`${API}${path}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    cache: "no-store"
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function apiPost(path: string, body: any) {
+  const token = getToken();
+  const res = await fetch(`${API}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
+    },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function apiPatch(path: string, body: any) {
+  const token = getToken();
+  const res = await fetch(`${API}${path}`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
+    },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+==============================================================
+===== apps/web/app/login/page.tsx =====
+==============================================================
+"use client";
+
+import { useState } from "react";
+import { apiPost } from "../lib/api";
+
+export default function LoginPage() {
+  const [email, setEmail] = useState("acme.admin@telcocredit.local");
+  const [password, setPassword] = useState("Admin123!");
+  const [msg, setMsg] = useState("");
+
+  async function onLogin() {
+    setMsg("");
+    try {
+      const r = await apiPost("/auth/login", { email, password });
+      localStorage.setItem("token", r.token);
+      window.location.href = "/";
+    } catch (e: any) {
+      setMsg(e.message || String(e));
+    }
+  }
+
+  return (
+    <div className="max-w-md">
+      <h1 className="text-2xl font-semibold">Login</h1>
+      <p className="text-sm text-gray-600 mt-1">Starter auth. Replace with Keycloak/Auth247 for production.</p>
+      <div className="mt-6 grid gap-3">
+        <label className="grid gap-1">
+          <span className="text-sm">Email</span>
+          <input className="border rounded-lg p-2" value={email} onChange={(e) => setEmail(e.target.value)} />
+        </label>
+        <label className="grid gap-1">
+          <span className="text-sm">Password</span>
+          <input className="border rounded-lg p-2" type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+        </label>
+        <button className="rounded-lg bg-black text-white p-2" onClick={onLogin}>Login</button>
+        {msg ? <div className="text-sm text-red-600">{msg}</div> : null}
+      </div>
+    </div>
+  );
+}
+
+==============================================================
+===== apps/web/app/page.tsx =====
+==============================================================
+"use client";
+
+import { useEffect, useState } from "react";
+import { apiGet } from "./lib/api";
+
+export default function Dashboard() {
+  const [data, setData] = useState<any>(null);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    apiGet("/dashboard/summary").then(setData).catch((e) => setErr(e.message || String(e)));
+  }, []);
+
+  if (err) {
+    return (
+      <div>
+        <h1 className="text-2xl font-semibold">Dashboard</h1>
+        <p className="mt-4 text-sm text-red-700">{err}</p>
+        <p className="mt-2 text-sm">If not logged in, go to <a className="underline" href="/login">/login</a>.</p>
+      </div>
+    );
+  }
+
+  if (!data) return <div>Loading...</div>;
+
+  return (
+    <div>
+      <h1 className="text-2xl font-semibold">Dashboard</h1>
+      <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+        <Card title="Total spend (this month)" value={`PGK ${Number(data.totalSpend || 0).toFixed(2)}`} />
+        <Card title="Employees" value={String(data.employees || 0)} />
+        <Card title="Network split" value={Object.entries(data.byNetwork || {}).map(([k,v]:any)=>`${k}:${Number(v).toFixed(2)}`).join(" | ") || "—"} />
+      </div>
+      <div className="mt-8 text-sm text-gray-600">
+        Period: {new Date(data.periodStart).toLocaleDateString()} – {new Date(data.periodEnd).toLocaleDateString()}
+      </div>
+    </div>
+  );
+}
+
+function Card({ title, value }: { title: string; value: string }) {
+  return (
+    <div className="rounded-xl border p-4">
+      <div className="text-sm text-gray-600">{title}</div>
+      <div className="mt-2 text-xl font-semibold">{value}</div>
+    </div>
+  );
+}
+
+==============================================================
+===== apps/web/app/employees/page.tsx =====
+==============================================================
+"use client";
+
+import { useEffect, useState } from "react";
+import { apiGet, apiPost, apiPatch } from "../lib/api";
+
+export default function EmployeesPage() {
+  const [rows, setRows] = useState<any[]>([]);
+  const [fullName, setFullName] = useState("");
+  const [msisdn, setMsisdn] = useState("");
+  const [department, setDepartment] = useState("");
+  const [msg, setMsg] = useState("");
+
+  async function load() {
+    setRows(await apiGet("/employees"));
+  }
+
+  useEffect(() => { load().catch(console.error); }, []);
+
+  async function add() {
+    setMsg("");
+    try {
+      await apiPost("/employees", { fullName, msisdn, department });
+      setFullName(""); setMsisdn(""); setDepartment("");
+      await load();
+      setMsg("Employee added.");
+    } catch (e: any) {
+      setMsg(e.message || String(e));
+    }
+  }
+
+  async function toggle(id: string, status: string) {
+    await apiPatch(`/employees/${id}`, { status: status === "ACTIVE" ? "SUSPENDED" : "ACTIVE" });
+    await load();
+  }
+
+  return (
+    <div>
+      <h1 className="text-2xl font-semibold">Employees</h1>
+
+      <div className="mt-6 rounded-xl border p-4">
+        <div className="font-medium">Add employee</div>
+        <div className="mt-3 grid gap-2 md:grid-cols-3">
+          <input className="border rounded-lg p-2" placeholder="Full name" value={fullName} onChange={(e)=>setFullName(e.target.value)} />
+          <input className="border rounded-lg p-2" placeholder="MSISDN e.g. +67570123456" value={msisdn} onChange={(e)=>setMsisdn(e.target.value)} />
+          <input className="border rounded-lg p-2" placeholder="Department" value={department} onChange={(e)=>setDepartment(e.target.value)} />
+        </div>
+        <button className="mt-3 rounded-lg bg-black text-white px-3 py-2" onClick={add}>Add</button>
+        {msg ? <div className="mt-2 text-sm text-gray-700">{msg}</div> : null}
+      </div>
+
+      <div className="mt-6 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left border-b">
+              <th className="py-2">Name</th>
+              <th>MSISDN</th>
+              <th>Department</th>
+              <th>Status</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r => (
+              <tr key={r.id} className="border-b">
+                <td className="py-2">{r.fullName}</td>
+                <td>{r.msisdn}</td>
+                <td>{r.department || "—"}</td>
+                <td>{r.status}</td>
+                <td className="text-right">
+                  <button className="underline" onClick={()=>toggle(r.id, r.status)}>
+                    {r.status === "ACTIVE" ? "Suspend" : "Activate"}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="mt-6 text-sm text-gray-600">
+        Employees request credit via SMS: <code>TOPUP 5</code>, <code>BAL</code>, <code>HISTORY</code>, <code>HELP</code>
+      </div>
+    </div>
+  );
+}
+
+==============================================================
+===== apps/web/app/invoices/page.tsx =====
+==============================================================
+"use client";
+
+import { useEffect, useState } from "react";
+import { apiGet, apiPost } from "../lib/api";
+
+export default function InvoicesPage() {
+  const [rows, setRows] = useState<any[]>([]);
+  const [msg, setMsg] = useState("");
+
+  async function load() {
+    setRows(await apiGet("/invoices"));
+  }
+
+  useEffect(() => { load().catch(console.error); }, []);
+
+  return (
+    <div>
+      <h1 className="text-2xl font-semibold">Invoices</h1>
+      <div className="mt-6 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left border-b">
+              <th className="py-2">Period</th>
+              <th>Issue</th>
+              <th>Due</th>
+              <th>Total</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r => (
+              <tr key={r.id} className="border-b">
+                <td className="py-2">{new Date(r.periodStart).toLocaleDateString()} – {new Date(r.periodEnd).toLocaleDateString()}</td>
+                <td>{new Date(r.issueDate).toLocaleDateString()}</td>
+                <td>{new Date(r.dueDate).toLocaleDateString()}</td>
+                <td>PGK {Number(r.totalAmount).toFixed(2)}</td>
+                <td>{r.status}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="mt-6 text-sm text-gray-600">
+        Statements are generated automatically on the 1st of each month and emailed to the billing email address.
+      </div>
+    </div>
+  );
+}
+
+==============================================================
+===== apps/sim-gateway/package.json =====
+==============================================================
+{
+  "name": "@telcocredit/sim-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "fastify": "^5.2.1"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.3"
+  }
+}
+
+==============================================================
+===== apps/sim-gateway/src/index.ts =====
+==============================================================
+import "dotenv/config";
+import Fastify from "fastify";
+
+/**
+ * LOCAL SIM GATEWAY STUB
+ * This simulates a USSD/Dealer-SIM topup gateway.
+ * In production, replace this service with one that actually:
+ * - controls GSM modems / Android devices
+ * - sends USSD commands
+ * - parses responses
+ */
+const app = Fastify({ logger: true });
+
+app.post("/v1/ussd", async (req, reply) => {
+  const apiKey = req.headers["x-api-key"];
+  if (apiKey !== (process.env.SIM_GATEWAY_API_KEY || "dev_key")) {
+    return reply.code(401).send({ status: "FAILED", raw: "unauthorized", reason: "Invalid API key" });
+  }
+
+  const body = req.body as any;
+  const { network, toMsisdn, amount, idempotencyKey } = body;
+
+  // Simulate deterministic behavior: amounts <= 50 succeed, else pending
+  if (Number(amount) <= 50) {
+    return { status: "SUCCESS", telcoRef: `${network}-${Date.now()}`, raw: `SIM_GATEWAY_STUB OK ${toMsisdn} ${amount}` };
+  }
+  return { status: "PENDING", raw: `SIM_GATEWAY_STUB PENDING ${toMsisdn} ${amount}`, telcoRef: `${network}-P-${Date.now()}` };
+});
+
+const port = Number(process.env.PORT || 5050);
+app.listen({ port, host: "0.0.0.0" }).then(() => {
+  app.log.info(`SIM gateway stub listening on :${port}`);
+});
+
+==============================================================
+===== apps/sim-gateway/.env.example =====
+==============================================================
+PORT=5050
+SIM_GATEWAY_API_KEY=dev_key
