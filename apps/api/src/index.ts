@@ -16,12 +16,12 @@ import { registerPaymentRoutes } from "./routes/payments.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { startWorkers } from "./workers/start.js";
 
-const logger = pino({
-  level: process.env.NODE_ENV === "development" ? "debug" : "info",
-  transport: process.env.NODE_ENV === "development" ? { target: "pino-pretty" } : undefined
+const app = Fastify({
+  logger: {
+    level: process.env.NODE_ENV === "development" ? "debug" : "info",
+    transport: process.env.NODE_ENV === "development" ? { target: "pino-pretty" } : undefined
+  }
 });
-
-const app = Fastify({ logger });
 
 await app.register(cors, { origin: true });
 await app.register(rateLimit, { max: 100, timeWindow: "1 minute" });
